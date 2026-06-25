@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+
+include("${CMAKE_CURRENT_LIST_DIR}/DeviceFactoryTargets.cmake")
+
+find_dependency(OpenCV REQUIRED)
+find_dependency(realsense2 REQUIRED)
