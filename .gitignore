@@ -12,6 +12,10 @@ _deps
 CMakeUserPresets.json
 build/
 
+tools/venv/
+venv/
+.venv/
+
 # CLion
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
