@@ -500,11 +500,13 @@ void Localizer::save_trajectory(const std::filesystem::path &file_path, const st
     }
     else if(format == std::string("TUM"))
     {
+        // TUM + 9th column: number of XFeat matches the frame was tracked with
+        ofs << "# timestamp tx ty tz qx qy qz qw n_matched" << std::endl;
         for(const auto& frame:trajectory)
         {
             cv::Vec3d t = frame.getPosition();
             cv::Quatd q = frame.getQuaternion();
-            ofs << std::setprecision(15) << frame.getTimestamp()  << std::setprecision(9) << " " << t[0] << " " << t[1] << " " << t[2] << " " << q.x << " " << q.y << " " << q.z << " " << q.w << std::endl;
+            ofs << std::setprecision(15) << frame.getTimestamp()  << std::setprecision(9) << " " << t[0] << " " << t[1] << " " << t[2] << " " << q.x << " " << q.y << " " << q.z << " " << q.w << " " << frame.getMatches() << std::endl;
         }
     }
     else

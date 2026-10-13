@@ -3,6 +3,8 @@
 #include <stella_vslam/data/common.h>
 #include <stella_vslam/data/frame.h>
 #include <stella_vslam/data/frame_observation.h>
+#include <stella_vslam/feature/liftfeat_extractor.h>
+#include <stella_vslam/match/base.h>
 
 #include <opencv2/imgproc.hpp>
 #include <fstream>
@@ -16,9 +18,27 @@
 
 using namespace stella_vslam;
 
-StellaBackend::StellaBackend(const CameraCalibration& calib) {
-    orb_params_ = new feature::orb_params("default");
-    extractor_ = new feature::orb_extractor(orb_params_, 800);
+StellaBackend::StellaBackend(const CameraCalibration& calib, FeatureType features, const std::string& liftfeat_model) {
+    if (features == FeatureType::LiftFeat) {
+        // orb_extractor swallows LiftFeat init errors and then crashes on the first extract(),
+        // so load the model once here to fail early with a clear message.
+        try {
+            feature::liftfeat_extractor probe(liftfeat_model);
+        }
+        catch (const std::exception& e) {
+            throw std::runtime_error("Failed to load LiftFeat model '" + liftfeat_model + "': " + e.what());
+        }
+
+        // Single pyramid level: stella's LiftFeat extraction mis-scales keypoints on levels > 0
+        // (and tags them all as octave 0), so only level 0 yields correct positions.
+        // The name must match Feature.name in configs/stella_liftfeat_config_template.yaml.
+        orb_params_ = new feature::orb_params("liftfeat", 1.2f, 1, 20, 7);
+        extractor_ = new feature::orb_extractor(orb_params_, 400, feature::descriptor_type::LIFTFEAT, {}, liftfeat_model);
+    }
+    else {
+        orb_params_ = new feature::orb_params("default");
+        extractor_ = new feature::orb_extractor(orb_params_, 400);
+    }
     cam_ = new camera::perspective(
         "vid", camera::setup_type_t::RGBD, camera::color_order_t::BGR,
         calib.getWidth(), calib.getHeight(), 30,
@@ -55,27 +75,34 @@ std::shared_ptr<data::keyframe> StellaBackend::createLidarFrame(
     cv::Mat gray;
     cv::cvtColor(rgb, gray, cv::COLOR_BGR2GRAY);
 
+    std::vector<cv::KeyPoint> all_keypts;
+    cv::Mat all_descriptors;
+    extractor_->extract(gray, mask, all_keypts, all_descriptors);
+
+    // Keep only keypoints with valid depth. ORB already respects the mask, but LiftFeat ignores it,
+    // and keypoints without depth would have no landmark (a null landmark breaks reprojectAndMerge).
     data::frame_observation frm_obs;
-    std::vector<cv::KeyPoint> keypts;
-    extractor_->extract(gray, mask, keypts, frm_obs.descriptors_);
-
-    if (keypts.size() < 30) return nullptr;
-
-    frm_obs.undist_keypts_ = keypts;
-    frm_obs.stereo_x_right_.resize(keypts.size(), -1);
-    frm_obs.depths_.resize(keypts.size(), -1);
-
-    for (size_t i = 0; i < keypts.size(); ++i) {
-        float x = keypts[i].pt.x;
-        float y = keypts[i].pt.y;
-        float d = depth.at<float>(static_cast<int>(y), static_cast<int>(x));
+    std::vector<int> keep;
+    keep.reserve(all_keypts.size());
+    for (size_t i = 0; i < all_keypts.size(); ++i) {
+        const auto& pt = all_keypts[i].pt;
+        float d = depth.at<float>(static_cast<int>(pt.y), static_cast<int>(pt.x));
         if (d <= 0) continue;
-        frm_obs.depths_[i] = d;
-        frm_obs.stereo_x_right_[i] = keypts[i].pt.x;
+        keep.push_back(static_cast<int>(i));
+        frm_obs.undist_keypts_.push_back(all_keypts[i]);
+        frm_obs.depths_.push_back(d);
+        frm_obs.stereo_x_right_.push_back(pt.x);
     }
 
-    int kf_id = map_db_->get_all_keyframes().size();
-    data::frame frame{static_cast<unsigned int>(kf_id), timestamp, cam_, orb_params_, frm_obs, {}};
+    if (keep.size() < 30) return nullptr;
+
+    frm_obs.descriptors_ = cv::Mat(static_cast<int>(keep.size()), all_descriptors.cols, all_descriptors.type());
+    for (size_t ni = 0; ni < keep.size(); ++ni)
+        all_descriptors.row(keep[ni]).copyTo(frm_obs.descriptors_.row(static_cast<int>(ni)));
+
+    // Unique, monotonically increasing ID (map_database stores keyframes keyed by id_)
+    const unsigned int kf_id = map_db_->next_keyframe_id_++;
+    data::frame frame{kf_id, timestamp, cam_, orb_params_, frm_obs, {}};
     frame.set_pose_cw(pose_cw);
 
     return data::keyframe::make_keyframe(kf_id, frame);
@@ -88,8 +115,7 @@ void StellaBackend::addKeyframeInternal(std::shared_ptr<data::keyframe> kf) {
 
 void StellaBackend::createLandmarksForKeyframe(std::shared_ptr<data::keyframe> kf) {
     auto& frame = kf->frm_obs_;
-    int lm_size = map_db_->get_all_landmarks().size();
-    
+
     for (size_t i = 0; i < frame.undist_keypts_.size(); ++i) {
         if (frame.depths_[i] <= 0) continue;
         
@@ -100,7 +126,8 @@ void StellaBackend::createLandmarksForKeyframe(std::shared_ptr<data::keyframe> k
         Vec4_t pos_w_homo = kf->get_pose_wc() * pos_c_homo;
         Vec3_t pos_w = pos_w_homo.head<3>() / pos_w_homo(3);
         
-        auto lm = std::make_shared<data::landmark>(lm_size + i, pos_w, kf);
+        // Unique, monotonically increasing ID (map_database stores landmarks keyed by id_)
+        auto lm = std::make_shared<data::landmark>(map_db_->next_landmark_id_++, pos_w, kf);
         kf->add_landmark(lm, i);
         lm->add_observation(kf, i);
         lm->compute_descriptor();
@@ -182,7 +209,8 @@ void StellaBackend::reprojectAndMerge(std::shared_ptr<data::keyframe> kf) {
             if (it == pixel_landmark_map.end()) continue;
 
             for (const auto& lm : it->second) {
-                int dist = cv::norm(lm->get_descriptor(), descriptors.row((int)i), cv::NORM_HAMMING);
+                // Hamming for ORB, scaled L2 for LiftFeat (both in [0, 256])
+                int dist = match::compute_descriptor_distance(lm->get_descriptor(), descriptors.row((int)i));
                 if (dist < descriptor_threshold) {
                     if (!matches.count(i) || dist < matches[i].second) {
                         matches[i] = {lm, dist};
@@ -196,7 +224,7 @@ void StellaBackend::reprojectAndMerge(std::shared_ptr<data::keyframe> kf) {
     for (const auto& [idx, pair] : matches) {
         auto curr = pair.first;
         auto prev = kf->get_landmark(idx);
-        if (prev != curr) {
+        if (prev && curr && prev != curr) {
             mergeLandmarks(prev, curr);
             ++mergeCount;
         }
@@ -466,14 +494,26 @@ void StellaBackend::finalize(const std::filesystem::path& output_path, const std
     json["cameras"][cam_->name_] = cam_->to_json();
     json["orb_params"][orb_params_->name_] = orb_params_->to_json();
 
-    for (auto& kf : map_db_->get_all_keyframes())
-        json["keyframes"][std::to_string(kf->id_)] = kf->to_json();
+    for (auto& kf : map_db_->get_all_keyframes()) {
+        auto kf_json = kf->to_json();
+        const cv::Mat& descs = kf->frm_obs_.descriptors_;
+        if (descs.type() == CV_32F) {
+            // stella's to_json assumes 32-byte binary descriptors and would truncate float ones
+            std::vector<std::vector<float>> json_descs(descs.rows);
+            for (int r = 0; r < descs.rows; ++r)
+                json_descs[r].assign(descs.ptr<float>(r), descs.ptr<float>(r) + descs.cols);
+            kf_json["descs"] = json_descs;
+        }
+        json["keyframes"][std::to_string(kf->id_)] = kf_json;
+    }
 
     for (auto& lm : map_db_->get_all_landmarks())
         json["landmarks"][std::to_string(lm->id_)] = lm->to_json();
 
-    json["keyframe_next_id"] = map_db_->get_all_keyframes().size();
-    json["landmark_next_id"] = map_db_->get_all_landmarks().size();
+    // Must be past the highest ID ever handed out, not the current count: keyframes/landmarks
+    // were erased above, and stella continues numbering from these values when the map is loaded.
+    json["keyframe_next_id"] = static_cast<unsigned int>(map_db_->next_keyframe_id_);
+    json["landmark_next_id"] = static_cast<unsigned int>(map_db_->next_landmark_id_);
 
     std::filesystem::path output_file = output_path / (mapName + ".msg");
     std::ofstream ofs(output_file, std::ios::out | std::ios::binary);

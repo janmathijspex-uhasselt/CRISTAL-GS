@@ -51,6 +51,7 @@
 #include <memory>
 #include <vector>
 #include <cstdlib>
+#include <algorithm>
 
 namespace Align = PclGsAlignment;
 
@@ -70,6 +71,15 @@ void printUsage(const char* progName) {
     std::cerr << "  --conda-env <name>    Name of conda environment. Default: gaussian_splatting \n";
     std::cerr << "  --alignment <path>    Load alignment transform between pcl and gs from file, if not given calculated automatically. [ONLY possible when both --pcl and --gs are given]\n";
     std::cerr << "  --no-neural       Use point projection (computeRGBD) instead of neural rendering. [ONLY possible when --pcl is given]\n\n";
+
+#ifdef STELLA_AVAILABLE
+    std::cerr << "Options for Stella VSLAM (build/full modes):\n";
+    std::cerr << "  --features <orb|liftfeat>   Feature type for keypoints/descriptors. Default: orb\n";
+    std::cerr << "  --liftfeat-model <path>     LiftFeat ONNX model (.onnx.data must be next to it).\n";
+    std::cerr << "                              Default: " << PREBUILD_CONFIGS_DIR << "/liftfeat_model/liftfeat_core.onnx\n\n";
+#else
+    std::cerr << "  --features / --liftfeat-model are accepted but ignored (ORB-SLAM3 only supports ORB)\n\n";
+#endif
 
 #ifdef ORBSLAM3_AVAILABLE
     std::cerr << "Options for ORB-SLAM3 (build/full modes):\n";
@@ -465,12 +475,20 @@ bool buildMap(const std::filesystem::path& cacheDir,
               FrameCache& cache,
               bool useNeural,
               [[maybe_unused]] const std::string& vocPath,
-              [[maybe_unused]] const std::string& configTemplate) {
+              [[maybe_unused]] const std::string& configTemplate,
+              [[maybe_unused]] const std::string& features,
+              [[maybe_unused]] const std::string& liftfeatModel) {
 
     std::cout << "\n=== Building Map ===" << std::endl;
     std::string renderTag = useNeural ? "neural" : "projected";
     std::string cloudStem = cloudFile.stem().string();
     std::string map_tag = cloudStem + "_" + renderTag;
+#ifdef STELLA_AVAILABLE
+    // Keep LiftFeat maps from overwriting ORB maps built from the same cache
+    if (features == "liftfeat") {
+        map_tag += "_liftfeat";
+    }
+#endif
 
     if (!cache.initForReading()) {
         std::cerr << "Failed to load frame cache. Run 'render' mode first." << std::endl;
@@ -481,8 +499,17 @@ bool buildMap(const std::filesystem::path& cacheDir,
     std::unique_ptr<SlamBackend> backend;
 
 #ifdef STELLA_AVAILABLE
-    std::cout << "Initializing Stella VSLAM backend..." << std::endl;
-    backend = std::make_unique<StellaBackend>(calib);
+    std::cout << "Initializing Stella VSLAM backend (features: " << features << ")..." << std::endl;
+    try {
+        if (features == "liftfeat") {
+            backend = std::make_unique<StellaBackend>(calib, StellaBackend::FeatureType::LiftFeat, liftfeatModel);
+        } else {
+            backend = std::make_unique<StellaBackend>(calib);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << std::endl;
+        return false;
+    }
 #endif
 
 #ifdef ORBSLAM3_AVAILABLE
@@ -554,6 +581,9 @@ bool buildMap(const std::filesystem::path& cacheDir,
                               cloudStem, "", renderTag);
         auto mapBuildEnd = std::chrono::high_resolution_clock::now();
         auto mapBuildMs = std::chrono::duration_cast<std::chrono::milliseconds>(mapBuildEnd - mapBuildStart).count();
+#ifdef STELLA_AVAILABLE
+        meta << "# features: " << features << "\n";
+#endif
         meta << "# num_keyframes: " << backend->getKeyframeCount() << "\n";
         meta << "# num_landmarks: " << backend->getLandmarkCount() << "\n";
         meta << "# map_construction_time_ms: " << mapBuildMs << "\n";
@@ -595,6 +625,8 @@ int main(int argc, char** argv) {
     std::string condaEnv  = "gaussian_splatting";
     std::string alignmentFile;
     bool useNeural = true;
+    std::string features = "orb";
+    std::string liftfeatModel = std::string(PREBUILD_CONFIGS_DIR) + "/liftfeat_model/liftfeat_core.onnx";
     int argIdx = 3;
 
     while (argIdx < argc && argv[argIdx][0] == '-') {
@@ -619,6 +651,11 @@ int main(int argc, char** argv) {
             vocPath = argv[++argIdx];
         } else if (arg == "--config" && argIdx + 1 < argc) {
             configTemplate = argv[++argIdx];
+        } else if (arg == "--features" && argIdx + 1 < argc) {
+            features = argv[++argIdx];
+            std::transform(features.begin(), features.end(), features.begin(), ::tolower);
+        } else if (arg == "--liftfeat-model" && argIdx + 1 < argc) {
+            liftfeatModel = argv[++argIdx];
         } else {
             std::cerr << "Unknown option: " << arg << std::endl;
             printUsage(argv[0]);
@@ -643,6 +680,22 @@ int main(int argc, char** argv) {
         printUsage(argv[0]);
         return 1;
     }
+    if (features != "orb" && features != "liftfeat") {
+        std::cerr << "Error: --features must be 'orb' or 'liftfeat'\n";
+        printUsage(argv[0]);
+        return 1;
+    }
+#ifdef STELLA_AVAILABLE
+    if (features == "liftfeat" && (mode == "build" || mode == "full") && !std::filesystem::exists(liftfeatModel)) {
+        std::cerr << "Error: LiftFeat model not found: " << liftfeatModel << "\n";
+        return 1;
+    }
+#else
+    if (features != "orb") {
+        std::cout << "Note: --features " << features << " is ignored, the ORB-SLAM3 backend only supports ORB features." << std::endl;
+        features = "orb";
+    }
+#endif
 
     // Determine cache folder based on --pcl / --gs
     std::filesystem::path cloudFile;
@@ -691,14 +744,14 @@ int main(int argc, char** argv) {
         return renderFrames(pclFile, gsFolder, lod, cacheDir, calib, cache, posesFile, alignmentFile, condaEnv, gsRepo, useNeural) ? 0 : 1;
     }
     else if (mode == "build") {
-        return buildMap(cacheDir, cloudFile, calibFile, calib, cache, useNeural, vocPath, configTemplate) ? 0 : 1;
+        return buildMap(cacheDir, cloudFile, calibFile, calib, cache, useNeural, vocPath, configTemplate, features, liftfeatModel) ? 0 : 1;
     }
     else if (mode == "full") {
         if (!renderFrames(pclFile, gsFolder, lod, cacheDir, calib, cache, posesFile, alignmentFile, condaEnv, gsRepo, useNeural)) {
             return 1;
         }
         FrameCache readCache(cacheDir, mapTag);
-        return buildMap(cacheDir, cloudFile, calibFile, calib, readCache, useNeural, vocPath, configTemplate) ? 0 : 1;
+        return buildMap(cacheDir, cloudFile, calibFile, calib, readCache, useNeural, vocPath, configTemplate, features, liftfeatModel) ? 0 : 1;
     }
 
     return 0;

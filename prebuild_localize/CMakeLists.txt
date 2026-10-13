@@ -108,7 +108,8 @@ if(STELLA_AVAILABLE)
     )
 
     target_compile_features(map_stella PRIVATE cxx_std_17)
-    target_compile_definitions(map_stella PRIVATE STELLA_AVAILABLE ${PCL_DEFINITIONS})
+    target_compile_definitions(map_stella PRIVATE STELLA_AVAILABLE ${PCL_DEFINITIONS}
+        PREBUILD_CONFIGS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/configs")
 
     target_include_directories(map_stella PRIVATE
         ${OpenCV_INCLUDE_DIRS}
@@ -178,7 +179,8 @@ if(ORB_SLAM3_AVAILABLE)
 
     target_compile_features(map_orb PRIVATE cxx_std_17)
     target_compile_options(map_orb PRIVATE -march=native)
-    target_compile_definitions(map_orb PRIVATE ORBSLAM3_AVAILABLE)
+    target_compile_definitions(map_orb PRIVATE ORBSLAM3_AVAILABLE
+        PREBUILD_CONFIGS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/configs")
 
     target_include_directories(map_orb PRIVATE
         ${OpenCV_INCLUDE_DIRS}

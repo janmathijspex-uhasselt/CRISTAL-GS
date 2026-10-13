@@ -19,12 +19,19 @@
  */
 class StellaBackend : public SlamBackend {
 public:
+    enum class FeatureType { ORB, LiftFeat };
+
     /**
      * @brief Construct a Stella VSLAM backend.
      * 
      * @param calib Camera calibration parameters
+     * @param features Feature type used for keypoints/descriptors
+     * @param liftfeat_model Path to the LiftFeat ONNX model (only used for FeatureType::LiftFeat)
+     * @throws std::runtime_error if the LiftFeat model cannot be loaded
      */
-    explicit StellaBackend(const CameraCalibration& calib);
+    explicit StellaBackend(const CameraCalibration& calib,
+                           FeatureType features = FeatureType::ORB,
+                           const std::string& liftfeat_model = "");
     ~StellaBackend() override;
 
     bool addKeyframe(const cv::Mat& rgb, const cv::Mat& depth, 

@@ -171,6 +171,24 @@ bool createStellaConfig(const std::filesystem::path& template_file,
         std::cerr << "Camera parameters may not be inserted correctly" << std::endl;
     }
 
+    // Resolve a relative onnx_model_path (LiftFeat) against the template's folder,
+    // stella would otherwise resolve it against the current working directory
+    const std::string onnx_key = "onnx_model_path:";
+    size_t onnx_pos = content.find(onnx_key);
+    if (onnx_pos != std::string::npos) {
+        size_t value_start = onnx_pos + onnx_key.size();
+        size_t value_end = content.find('\n', value_start);
+        if (value_end == std::string::npos) value_end = content.size();
+        std::string value = content.substr(value_start, value_end - value_start);
+        value.erase(0, value.find_first_not_of(" \t\"'"));
+        value.erase(value.find_last_not_of(" \t\"'\r") + 1);
+        std::filesystem::path model_path(value);
+        if (!value.empty() && model_path.is_relative()) {
+            model_path = std::filesystem::absolute(template_file).parent_path() / model_path;
+            content.replace(value_start, value_end - value_start, " \"" + model_path.lexically_normal().string() + "\"");
+        }
+    }
+
     // Write output file
     std::ofstream output_stream(output_file);
     if (!output_stream.is_open()) {

@@ -1,0 +1,78 @@
+# Stella VSLAM Configuration Template (LiftFeat features)
+# Use with --voc liftfeat.fbow and a map built with: map_stella ... --features liftfeat
+# Camera intrinsic parameters will be automatically filled in
+
+#==============#
+# Camera Model #
+#==============#
+
+Camera:
+  name: "vid"
+  setup: "monocular"
+  model: "perspective"
+
+  # ===== CAMERA PARAMETERS START =====
+  fx: 500.0
+  fy: 500.0
+  cx: 320.0
+  cy: 240.0
+
+  k1: 0.0
+  k2: 0.0
+  p1: 0.0
+  p2: 0.0
+  k3: 0.0
+
+  fps: 30.0
+  cols: 640
+  rows: 480
+  # ===== CAMERA PARAMETERS END =====
+
+  color_order: "RGB"
+
+#=====================#
+# Tracking Parameters #
+#=====================#
+
+Preprocessing:
+  min_size: 400
+  descriptor_type: "LIFTFEAT"
+  # Relative paths are resolved against this template's folder
+  onnx_model_path: "liftfeat_model/liftfeat_core.onnx"
+
+#================#
+# ORB Parameters #
+#================#
+
+# LiftFeat must use a single level: stella's LiftFeat extraction mis-scales keypoints on
+# pyramid levels > 0. Name and values must match the "liftfeat" params map_stella writes into the map.
+Feature:
+  name: "liftfeat"
+  scale_factor: 1.2
+  num_levels: 1
+  ini_fast_threshold: 20
+  min_fast_threshold: 7
+
+#====================#
+# Mapping Parameters #
+#====================#
+
+#Mapping:
+#  baseline_dist_thr_ratio: 0.02
+#  redundant_obs_ratio_thr: 0.9
+#  num_covisibilities_for_landmark_generation: 20
+#  num_covisibilities_for_landmark_fusion: 20
+
+#KeyframeInserter:
+#  lms_ratio_thr_view_changed: 0.3
+#  lms_ratio_thr_almost_all_lms_are_tracked: 0.8
+
+#Initializer:
+#  use_fixed_seed: true
+
+Relocalizer:
+  #use_fixed_seed: true
+  min_num_bow_matches: 12
+  min_num_valid_obs: 15
+  max_num_ransac_iter: 300
+  num_common_words_thr_ratio: 0.80
